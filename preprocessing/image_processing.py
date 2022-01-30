@@ -13,22 +13,23 @@ from skimage.morphology import remove_small_objects
 from skimage.filters import threshold_local
 from skimage import io
 from skimage.registration import phase_cross_correlation
-import sys
 
+import config
 import util
+from definitions import *
 
 log = logging.getLogger(__name__)
 
 
-def run(recording_folder, io_filename='Io.hdf5', disp_filename='Display.hdf5'):
-
+def run(recording_folder, io_filename='Io.hdf5', disp_filename='Display.hdf5', **kwargs):
     # Iterate over all folders
     log.info(f'Process image data in {recording_folder}')
 
-    ca_filepath = util.get_tif_filepath(recording_folder)
-    if ca_filepath is None:
-        log.warning('Skip processing. No Ca file found')
+    ca_filename = util.get_tif_filename(recording_folder)
+    if ca_filename is None:
+        log.warning(f'Skip processing. No Ca file found in folder {recording_folder}')
         return False
+    ca_filepath = os.path.join(recording_folder, ca_filename)
 
     log.info(f'Using Ca file {ca_filepath}')
 
@@ -43,196 +44,203 @@ def run(recording_folder, io_filename='Io.hdf5', disp_filename='Display.hdf5'):
         log.warning(f'{io_filename} not found')
         return False
 
-    out_filepath = os.path.join(recording_folder, f'{ca_filepath[:-4]}.output.hdf5')
-    if os.path.exists(out_filepath) and '--overwrite' not in sys.argv[1:]:
-        log.info(f'Output file {out_filepath} already exists. No overwrite option. Skip')
+    out_name = '.'.join(ca_filename.split('.')[:-1])
+    out_filepath = os.path.join(recording_folder, f'{out_name}.output.hdf5')
+    if os.path.exists(out_filepath) and not kwargs[ARG_OVERWRITE]:
+        log.warning(f'Skip {recording_folder}. Output file already exists. '
+                    f'Use overwrite option "{OPT_OVERWRITE}"')
         return False
 
     log.info(f'Copy file {disp_filepath} to {out_filepath} for final output')
     shutil.copyfile(disp_filepath, out_filepath)
 
-    log.info('Read calcium and synchronization data')
-    ca_data = CaImgPrep(ca_filepath)
-    ca_data.appendTimeInfo(io_filepath)
+    log.info('Run registration')
+    # Do registration and segmentation
+    ca_data = CalciumImagingData(ca_filepath)
+    ca_data.registration()
+    ca_frame_indices, ca_frame_times = get_ca_frame_timing(io_filepath, ca_data.raw_frames.shape[0])
+    rois = RoiSelector(ca_data.std_image)
+    raw_calcium_signals = ca_data.extract_calcium_signals(rois.mask_labels)
+
+    with h5.File(out_filepath, 'r') as f:
+        disp_start_time = f['phase1'].attrs['start_time']
+        dff = calculate_dffs(disp_start_time, ca_frame_times, ca_frame_indices, raw_calcium_signals)
 
     log.info(f'Write to output file at {out_filepath}')
     with h5.File(out_filepath, 'a') as out_file:
-        disp_start_time = out_file['phase1'].attrs['start_time']
-        ca_data.calcDff(disp_start_time)
-        outputDstName = {'dff': np.array(ca_data.dff),
-                         'raw_f': np.array(ca_data.rawCaTrace),
-                         'std_image': ca_data.stdImg,
-                         'roi_mask': ca_data.ROImask,
-                         'frame_time': ca_data.ca_frame_time}
+        outputs = {REGISTERED_FRAMES: ca_data.registered_frames,
+                   STD_IMAGE: ca_data.std_image,
+                   DFF: dff,
+                   RAW_F: raw_calcium_signals,
+                   ROI_MASK: rois.mask_labels,
+                   FRAME_TIME: ca_frame_times}
 
-        for key, val in outputDstName.items():
+        for key, val in outputs.items():
             if key not in out_file.keys():
                 dset = out_file.create_dataset(key, val.shape)
             else:
                 dset = out_file[key]
             dset[:] = val
 
-        for i in out_file.keys():
-            if 'phase' in i:
-                frame_start_idx = np.argmin(np.abs(out_file[f'{i}/ddp_time'][0] - ca_data.ca_frame_time))
-                out_file[i].attrs['ca_start_frame'] = frame_start_idx
-                frame_end_idx = np.argmin(np.abs(out_file[f'{i}/ddp_time'][-1] - ca_data.ca_frame_time))
-                out_file[i].attrs['ca_end_frame'] = frame_end_idx
+        for key in out_file.keys():
+            if 'phase' not in key:
+                continue
+
+            frame_start_idx = np.argmin(np.abs(out_file[f'{key}/ddp_time'][0] - ca_frame_times))
+            out_file[key].attrs['ca_start_frame'] = frame_start_idx
+            frame_end_idx = np.argmin(np.abs(out_file[f'{key}/ddp_time'][-1] - ca_frame_times))
+            out_file[key].attrs['ca_end_frame'] = frame_end_idx
 
 
-class CaImgPrep:
+class CalciumImagingData:
     def __init__(self, cafn, **kwargs):
-        self.rawImg = np.array(io.imread(cafn))
-        self._param = {
-            "binsize": 500,
-            "stepsize": 250,
-            "hpfiltSig": .1,
-            "localThreKerSize": 31,
-            "smoothSig": 3,
-            "binaryThre": 0.5,
-            "bgKerSize": 5,
-            "fgKerSize": 2,
-            "minSizeLim": 50,
-            "maxSizeLim": 500
-        }
-        self._param.update(kwargs)
-        self.__dict__.update(self._param)
-        self.parse()
+        self.raw_frames = np.array(io.imread(cafn))
 
-    def parse(self):
-        self.registration()
-        self.segmentation()
-        self.applyROImask()
+        self.binsize = kwargs.get('binsize')
+        if self.binsize is None:
+            self.binsize = 500
+
+        self.stepsize = kwargs.get('stepsize')
+        if self.stepsize is None:
+            self.stepsize = 250
+
+        self.std_image = None
+        self.registered_frames = None
 
     def registration(self, binsize=None, stepsize=None):
         if binsize is not None:
             self.binsize = binsize
         if stepsize is not None:
             self.stepsize = stepsize
-        templateImg = np.mean(self.rawImg[:self.binsize], axis=0)
+        image_template = np.mean(self.raw_frames[:self.binsize], axis=0)
         i = self.stepsize
-        regTifImg = copy.copy(self.rawImg)
-        oldDrift = None
-        while i < self.rawImg.shape[0]:
-            movingImg = np.mean(self.rawImg[i:i + self.binsize], axis=0)
-            imgDrift = phase_cross_correlation(templateImg, movingImg)[0]
-            if oldDrift is None:
-                oldDrift = imgDrift
-            for o in range(min(self.stepsize, self.rawImg.shape[0] - i)):
+        regTifImg = copy.copy(self.raw_frames)
+        old_drift = None
+        while i < self.raw_frames.shape[0]:
+            moving_template = np.mean(self.raw_frames[i:i + self.binsize], axis=0)
+            image_drift = phase_cross_correlation(image_template, moving_template)[0]
+            if old_drift is None:
+                old_drift = image_drift
+            for o in range(min(self.stepsize, self.raw_frames.shape[0] - i)):
                 itershift = np.vstack(
-                    [np.eye(2), imgDrift[::-1] * (1 - o / self.stepsize) + oldDrift[::-1] * o / self.stepsize]).T
-                regTifImg[i + o] = cv2.warpAffine(self.rawImg[i + o], itershift, tuple(templateImg.shape))
-                # printProgressBar(i+o,self.rawImg.shape[0],prefix='Motion correction: ')
-            oldDrift = imgDrift
+                    [np.eye(2), image_drift[::-1] * (1 - o / self.stepsize) + old_drift[::-1] * o / self.stepsize]).T
+                regTifImg[i + o] = cv2.warpAffine(self.raw_frames[i + o], itershift, tuple(image_template.shape))
+            old_drift = image_drift
             i += self.stepsize
-        self.regImg = regTifImg
-        self.stdImg = np.std(self.regImg, axis=0)
+        self.registered_frames = regTifImg
+        self.std_image = np.std(self.registered_frames, axis=0)
 
-    def segmentation(self, **kwargs):
-        if self.stdImg is not None:
-            self._param.update(kwargs)
-            self.ROIselector = ROIselector(self.stdImg, **self._param)
-            self.ROImask = self.ROIselector.labels
-        log.info('Segmentation: Done')
+    def extract_calcium_signals(self, roi_masks: np.ndarray) -> np.ndarray:
+        raw_calcium_signals = []
+        for i in np.unique(roi_masks):
+            if i == 0:
+                continue
 
-    def applyROImask(self):
-        self.rawCaTrace = []
-        for i in np.unique(self.ROImask):
-            if i > 0:
-                self.rawCaTrace.append(self.regImg[:, self.ROImask == i].sum(axis=1))
+            raw_calcium_signals.append(self.registered_frames[:, roi_masks == i].sum(axis=1))
         log.info("ROI trace extraction: Done")
 
-    def appendTimeInfo(self, timeInfoH5Fn):
-        with h5.File(timeInfoH5Fn, 'r') as mirInfo:
-            mirTime = np.squeeze(mirInfo['y_mirror_in_time'])
-            mirPos = np.squeeze(mirInfo['y_mirror_in'])
-
-        diffMirPos = np.diff(mirPos)
-        temp_ind, _ = find_peaks(diffMirPos, prominence=np.std(diffMirPos))
-        peak_ind, _ = find_peaks(mirPos[temp_ind[0]:], prominence=np.std(diffMirPos))
-        valley_ind, _ = find_peaks(-mirPos[temp_ind[0]:], prominence=np.std(diffMirPos))
-        valley_ind = np.hstack([1, valley_ind])
-        ca_frame_idx = temp_ind[0] + np.unique(np.concatenate([peak_ind, valley_ind], axis=0)) - 1
-
-        # Only use timepoints for there are frames (recording may run longer than ca imaging)
-        ca_frame_idx = ca_frame_idx[:self.rawImg.shape[0]]
-        ca_frame_time = mirTime[ca_frame_idx]
-        self.mirTime = mirTime
-        self.mirPos = mirPos
-        self.ca_frame_idx = ca_frame_idx
-        self.ca_frame_time = ca_frame_time
-
-    def calcDff(self, stiStTime):
-        caframetimeIdx = np.argmax(self.ca_frame_time[self.ca_frame_time < stiStTime])
-        blEndFrame = self.ca_frame_idx[caframetimeIdx]
-        self.dff = [(i - np.mean(i[:blEndFrame])) / np.mean(i[:blEndFrame]) for i in self.rawCaTrace]
-        self.stiStTime = stiStTime
-        self.stiStFrame = blEndFrame
+        return np.array(raw_calcium_signals)
 
 
-rnorm = lambda x: (x - x.min()) / (x.max() - x.min())
+def calculate_dffs(stimulus_start_time, ca_frame_times, ca_frame_indices, raw_calcium_signals):
+    caframetimeIdx = np.argmax(ca_frame_times[ca_frame_times < stimulus_start_time])
+    bl_end_frame = ca_frame_indices[caframetimeIdx]
+    dff = [(i - np.mean(i[:bl_end_frame])) / np.mean(i[:bl_end_frame]) for i in raw_calcium_signals]
+
+    return np.array(dff)
 
 
-class ROIselector:
+def get_ca_frame_timing(timeInfoH5Fn, ca_frame_count):
+    with h5.File(timeInfoH5Fn, 'r') as mirInfo:
+        mirror_position = np.squeeze(mirInfo[config.Y_MIRROR_SIGNAL])
+        mirror_time = np.squeeze(mirInfo[f'{config.Y_MIRROR_SIGNAL}{config.TIME_POSTFIX}'])
+
+    mirror_pos_diff = np.diff(mirror_position)
+    temp_ind, _ = find_peaks(mirror_pos_diff, prominence=np.std(mirror_pos_diff))
+    peak_ind, _ = find_peaks(mirror_position[temp_ind[0]:], prominence=np.std(mirror_pos_diff))
+    valley_ind, _ = find_peaks(-mirror_position[temp_ind[0]:], prominence=np.std(mirror_pos_diff))
+    valley_ind = np.hstack([1, valley_ind])
+    ca_frame_indices = temp_ind[0] + np.unique(np.concatenate([peak_ind, valley_ind], axis=0)) - 1
+
+    # Only use timepoints for there are frames (recording may run longer than ca imaging)
+    ca_frame_indices = ca_frame_indices[:ca_frame_count]
+    ca_frame_times = mirror_time[ca_frame_indices]
+
+    return ca_frame_indices, ca_frame_times
+
+
+class RoiSelector:
     def __init__(self, img, **kwargs):
         self.raw = img
-        self._param = {
-            "hpfiltSig": .1,
-            "localThreKerSize": 31,
-            "smoothSig": 3,
-            "binaryThre": 0.5,
-            "bgKerSize": 5,
-            "fgKerSize": 2,
-            "minSizeLim": 50,
-            "maxSizeLim": 500
-        }
+
+        self.hp_filter_sigma_x = kwargs.get('hp_filter_sigma_x')
+        if self.hp_filter_sigma_x is None:
+            self.hp_filter_sigma_x = .1
+
+        self.local_thresh_kernel_size = kwargs.get('local_thresh_kernel_size')
+        if self.local_thresh_kernel_size is None:
+            self.local_thresh_kernel_size = 31
+
+        self.smooth_sigma_x = kwargs.get('smooth_sigma_x')
+        if self.smooth_sigma_x is None:
+            self.smooth_sigma_x = 3
+
+        self.binary_thresh = kwargs.get('binary_thresh')
+        if self.binary_thresh is None:
+            self.binary_thresh = .5
+
+        self.bg_kernel_size = kwargs.get('bg_kernel_size')
+        if self.bg_kernel_size is None:
+            self.bg_kernel_size = 5
+
+        self.fg_kernel_size = kwargs.get('fg_kernel_size')
+        if self.fg_kernel_size is None:
+            self.fg_kernel_size = 2
+
+        self.min_size = kwargs.get('min_size')
+        if self.min_size is None:
+            self.min_size = 50
+
+        self.max_size = kwargs.get('max_size')
+        if self.max_size is None:
+            self.max_size = 500
+
         self.conn = np.ones((3, 3,))
-        self._param.update(kwargs)
-        self.__dict__.update(self._param)
-        self.parse()
 
-    def parse(self):
-        self.bp()
-        self.binarization()
-        self.compute_bgMarker()
-        self.compute_fgMarker()
-        self.watershed()
-        self.sizeFilter()
-        self.orderlabel()
+        self.hpRaw = cv2.GaussianBlur(self.raw, (0, 0), self.hp_filter_sigma_x)
+        self.bpRaw = self.hpRaw / threshold_local(self.hpRaw, self.local_thresh_kernel_size)
+        rnorm = lambda x: (x - x.min()) / (x.max() - x.min())
+        self.smoothed = cv2.GaussianBlur(rnorm(self.bpRaw), (0, 0), self.smooth_sigma_x)
 
-    def bp(self):
-        self.hpRaw = cv2.GaussianBlur(self.raw, (0, 0), self.hpfiltSig)
-        self.bpRaw = self.hpRaw / threshold_local(self.hpRaw, self.localThreKerSize)
-        self.smoothed = cv2.GaussianBlur(rnorm(self.bpRaw), (0, 0), self.smoothSig)
+        bwIm = (self.smoothed > (np.mean(self.smoothed) + self.binary_thresh * np.std(self.smoothed)))
+        self.binarized = remove_small_objects(bwIm, self.min_size, connectivity=4).astype(np.uint8)
 
-    def binarization(self):
-        bwIm = (self.smoothed > (np.mean(self.smoothed) + self.binaryThre * np.std(self.smoothed)))
-        self.binarized = remove_small_objects(bwIm, self.minSizeLim, connectivity=4).astype(np.uint8)
-
-    def compute_bgMarker(self):
-        bgDilateKer = np.ones((self.bgKerSize,) * 2, np.uint8)
+        # Calculate BG marker
+        bgDilateKer = np.ones((self.bg_kernel_size,) * 2, np.uint8)
         self.bgMarker = clear_border(cv2.dilate(self.binarized, bgDilateKer, 1) > 0)
 
-    def compute_fgMarker(self):
-        fgDilateKer = np.ones((self.fgKerSize,) * 2, np.uint8)
-        maxCoord = peak_local_max(self.smoothed, footprint=self.conn, indices=False, exclude_border=0)
-        self.fgMarker = clear_border(cv2.dilate(maxCoord.astype(np.uint8), fgDilateKer)) > 0
+        # Calculate FG marker
+        fgDilateKer = np.ones((self.fg_kernel_size,) * 2, np.uint8)
+        max_coord = peak_local_max(self.smoothed, footprint=self.conn, indices=False, exclude_border=0)
+        # peak_mask = np.zeros_like(img2, dtype=bool)
+        # >> > peak_mask[tuple(peak_idx.T)] = True
+        self.fgMarker = clear_border(cv2.dilate(max_coord.astype(np.uint8), fgDilateKer)) > 0
 
-    def watershed(self):
+        # Calculate watershed
         self.distanceMap = ndi.distance_transform_edt(self.bgMarker)
         markers = ndi.label(self.fgMarker)[0]
         self.rawlabel = watershed(-self.distanceMap, markers, mask=self.bgMarker, watershed_line=True)
 
-    def sizeFilter(self):
+        # Filter for size
         temp_val, temp_idx = np.unique(self.rawlabel, return_inverse=True)
         num_of_val = np.bincount(temp_idx)
         exclude_val = temp_val[
-            np.bitwise_or(num_of_val <= np.array(self.minSizeLim), num_of_val >= np.array(self.maxSizeLim))]
-        self.labels = copy.copy(self.rawlabel)
-        self.labels[np.isin(self.rawlabel, exclude_val)] = 0
+            np.bitwise_or(num_of_val <= np.array(self.min_size), num_of_val >= np.array(self.max_size))]
+        self.mask_labels = copy.copy(self.rawlabel)
+        self.mask_labels[np.isin(self.rawlabel, exclude_val)] = 0
 
-    def orderlabel(self):
-        sortedLabel = copy.copy(self.labels)
-        for i, v in enumerate(np.unique(self.labels)):
-            sortedLabel[self.labels == v] = i
-        self.labels = sortedLabel
+        # Order labels
+        sortedLabel = copy.copy(self.mask_labels)
+        for i, v in enumerate(np.unique(self.mask_labels)):
+            sortedLabel[self.mask_labels == v] = i
+        self.mask_labels = sortedLabel

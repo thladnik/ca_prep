@@ -1,3 +1,19 @@
 ZSCORE = 'zscore'
+SELECTED_ZSCORE = 'selected_zscore'
 DFF = 'dff'
+REGISTERED_FRAMES = 'registered_frames'
+SELECTED_DFF = 'selected_dff'
+RAW_F = 'raw_f'
+STD_IMAGE = 'std_image'
+ROI_MASK = 'roi_mask'
+FRAME_TIME = 'frame_time'
 
+ARG_OVERWRITE = '_overwrite'
+ARG_PLOT = '_plot'
+
+OPT_OVERWRITE = ('--overwrite', '-o', )
+OPT_PLOT = ('--plot', 'p')
+
+CMD_EXCTRACT_ROIS = 'extract_rois'
+CMD_FILTER_ROIS = 'filter_rois'
+CMD_DETECT_EVENTS = 'detect_events'

@@ -14,7 +14,7 @@ import util
 log = logging.getLogger(__name__)
 
 
-def filter_rois(recording_folder: str, max_dff_thresh: float):
+def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
 
     # Fetch processing (output) file
     processing_filepath = util.get_processing_filepath(recording_folder)
@@ -23,33 +23,57 @@ def filter_rois(recording_folder: str, max_dff_thresh: float):
 
     with h5py.File(processing_filepath, 'r') as f:
 
+        times = f[FRAME_TIME][:]
         dff = f[DFF][:]
         zscore = f[ZSCORE][:]
-        selected_dff = dff[dff.max(axis=1) > max_dff_thresh]
+
+        # Filter by DFF
+        selected = dff.max(axis=1) > max_dff_thresh
+        selected_dff = dff[selected]
+        selected_zscore = zscore[selected]
 
         # Plot filtered/accepted ROIs
-        fig, ax = plt.subplots(figsize=(7, 12))
-        for i, (trace, z) in enumerate(zip(dff, zscore)):
-            j = i * 3
-            if trace.max() > max_dff_thresh:
-                ax.plot(j + trace, color='black', linewidth=.5)
-                ax.plot(j + z, color='red', linewidth=.5)
+        fig, ax = plt.subplots(1, 2, figsize=(20, 12), sharex=True, sharey=True)
+        dmult = 2
+        zmult = 12
+        count = dff.shape[0]
+        for i, (s, d, z) in enumerate(zip(selected, dff, zscore)):
+            if s:
+                ax[0].plot(times, i + d / dmult, color='black', linewidth=.5)
+                ax[1].plot(times, i + z / zmult, color='red', linewidth=.5)
             else:
-                ax.plot(j + trace, color='gray', linewidth=.5)
-                ax.plot(j + z, color='orange', linewidth=.5)
+                ax[0].plot(times, i + d / dmult, color='gray', linewidth=.5)
+                ax[1].plot(times, i + z / zmult, color='orange', linewidth=.5)
 
         stim_seps = util.get_phase_start_points(f)
-        ax.vlines(stim_seps, 0, dff.shape[0], colors='orange')
+
+        ax[0].set_title('dF/mF')
+        ax[0].set_ylabel('ROI')
+        ax[0].set_xlabel('Time [s]')
+        ax[0].vlines(times[stim_seps], 0, count, colors='orange')
+        ax[0].set_yticks(np.arange(count, step=25))
+
+        ax[1].set_title('Z-Score')
+        ax[1].set_xlabel('Time [s]')
+        ax[1].vlines(times[stim_seps], 0, count, colors='orange')
+        ax[1].set_yticks(np.arange(count, step=25))
+        ax[1].set_ylim(-1, count+2)
         fig.tight_layout()
         fig.savefig(os.path.join(recording_folder, 'roi_selection.svg'), format='svg')
-        plt.show()
+
+        if kwargs[ARG_PLOT]:
+            plt.show()
 
     # Write to file
     log.info('Write results to file')
     with h5py.File(processing_filepath, 'a') as f:
-        if 'selected_dff' in f:
-            del f['selected_dff']
-        f.create_dataset('selected_dff', data=selected_dff)
+        if SELECTED_DFF in f:
+            del f[SELECTED_DFF]
+        f.create_dataset(SELECTED_DFF, data=selected_dff)
+
+        if SELECTED_ZSCORE in f:
+            del f[SELECTED_ZSCORE]
+        f.create_dataset(SELECTED_ZSCORE, data=selected_zscore)
 
 
 def calculate_zscores(recording_folder: str):

@@ -1,8 +1,10 @@
 import logging
 import os
 from typing import List, Union, Callable
-
 import numpy as np
+import yaml
+
+import config
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +49,10 @@ def get_path(path: Union[str, list]) -> Union[str, None]:
     return os.path.join(*path)
 
 
-def get_tif_filepath(path: str) -> Union[str, None]:
+def get_tif_filename(path: str) -> Union[str, None]:
     for name in os.listdir(path):
-        if name.endswith('.tif'):
-            return os.path.join(path, name)
+        if name.lower().endswith('.tif'):
+            return name
     return None
 
 
@@ -69,3 +71,10 @@ def apply_to_all_recording_folders(root_path: str, fun: Callable, *args, **kwarg
     for recording_folder in recordings:
         log.info(f'Apply {fun.__qualname__} to recording {recording_folder}')
         fun(recording_folder, *args, **kwargs)
+
+
+def load_configuration(config_filepath: str):
+    with open(config_filepath, 'r') as f:
+        _config = yaml.safe_load(f)
+        log.info(f'Use configuration {_config}')
+        config.__dict__.update(_config)

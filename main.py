@@ -6,6 +6,7 @@ import numpy as np
 import logging
 
 from preprocessing import image_processing, signal_processing
+from definitions import *
 import util
 
 root = logging.getLogger()
@@ -35,15 +36,28 @@ if __name__ == '__main__':
         log.error('Invalid root path')
         quit()
 
-    if 'extract_rois' in sys.argv[1:]:
-        util.apply_to_all_recording_folders(root_path, image_processing.run)
+    # Load config
+    util.load_configuration('config.yaml')
+
+    # Get cmd options
+    kwargs = {}
+    kwargs[ARG_OVERWRITE] = False
+    if any([alt in sys.argv[1:] for alt in OPT_OVERWRITE]):
+        kwargs[ARG_OVERWRITE] = True
+
+    kwargs[ARG_PLOT] = False
+    if any([alt in sys.argv[1:] for alt in OPT_PLOT]):
+        kwargs[ARG_PLOT] = True
+
+    if CMD_EXCTRACT_ROIS in sys.argv[1:]:
+        util.apply_to_all_recording_folders(root_path, image_processing.run, **kwargs)
         # image_processing.run(root_path)
 
-    if 'filter_rois' in sys.argv[1:]:
-        util.apply_to_all_recording_folders(root_path, signal_processing.filter_rois, max_dff_thresh=1.2)
+    if CMD_FILTER_ROIS in sys.argv[1:]:
+        util.apply_to_all_recording_folders(root_path, signal_processing.filter_rois, max_dff_thresh=1.2, **kwargs)
         # event_detection.filter_rois(filepath, max_dff_thresh=1.2)
 
-    if 'detect_events' in sys.argv[1:]:
+    if CMD_DETECT_EVENTS in sys.argv[1:]:
         recording_path = os.path.join(root_path, 'rec_2021-12-14-16-33-22')
         signal_processing.detect_events(recording_path)
         # util.apply_to_all_recording_folders(root_path, signal.detect_events)
