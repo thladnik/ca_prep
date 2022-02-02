@@ -33,7 +33,7 @@ def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
         selected_zscore = zscore[selected]
 
         # Plot filtered/accepted ROIs
-        fig, ax = plt.subplots(1, 2, figsize=(20, 12), sharex=True, sharey=True)
+        fig, ax = plt.subplots(1, 2, figsize=(20, 12), sharex=True, sharey=True, num=recording_folder)
         dmult = 2
         zmult = 12
         count = dff.shape[0]
@@ -47,7 +47,7 @@ def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
 
         stim_seps = util.get_phase_start_points(f)
 
-        ax[0].set_title('dF/mF')
+        ax[0].set_title('dF/F')
         ax[0].set_ylabel('ROI')
         ax[0].set_xlabel('Time [s]')
         ax[0].vlines(times[stim_seps], 0, count, colors='orange')
@@ -60,6 +60,7 @@ def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
         ax[1].set_ylim(-1, count+2)
         fig.tight_layout()
         fig.savefig(os.path.join(recording_folder, 'roi_selection.svg'), format='svg')
+        fig.savefig(os.path.join(recording_folder, 'roi_selection.pdf'), format='pdf')
 
         if kwargs[ARG_PLOT]:
             plt.show()
