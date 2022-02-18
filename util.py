@@ -1,12 +1,22 @@
 import logging
 import os
 from typing import List, Union, Callable
+
+import h5py.h5i
 import numpy as np
 import yaml
 
 import config
+from definitions import *
 
 log = logging.getLogger(__name__)
+
+
+def create_dataset(f: h5py.File, dataset_name: str, data: np.ndarray):
+    log.info(f'Create dataset {dataset_name} in {f}')
+    if dataset_name in f:
+        del f[dataset_name]
+    f.create_dataset(dataset_name, data=data)
 
 
 def cart2sph(x, y, z):
@@ -26,7 +36,7 @@ def sph2cart(theta, phi, r):
 
 
 def get_phase_start_points(f):
-    return [f[f'phase{i + 1}'].attrs['ca_start_frame'] for i in range(8)]
+    return [f[k].attrs['ca_start_frame'] for k in f.keys() if k.startswith('phase')]
 
 
 def get_path_segments(path: str) -> Union[List[str], None]:
@@ -57,9 +67,8 @@ def get_tif_filename(path: str) -> Union[str, None]:
 
 
 def get_processing_filepath(path: str) -> Union[str, None]:
-    for name in os.listdir(path):
-        if name.endswith('.output.hdf5'):
-            return os.path.join(path, name)
+    if os.path.exists(os.path.join(path, PATH_FN_PREPROCESSED)):
+        return os.path.join(path, PATH_FN_PREPROCESSED)
     return None
 
 

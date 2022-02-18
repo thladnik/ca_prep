@@ -11,12 +11,70 @@ from definitions import *
 import util
 
 
+def calculate_rf(phase: h5py.Group, roi_id: int):
+
+    # Fetch data
+    z = phase[ZSCORE][roi_id]
+    dff = phase[DFF][roi_id]
+    coords = np.squeeze(phase['vertex_coords'][:]).T
+    frames = phase['ddp_vertex_states'][:]
+    if z.shape[0] > frames.shape[0]:
+        z = z[:frames.shape[0]]
+
+    # Calculate map
+    img = (frames * z[:, np.newaxis]).sum(axis=0) / z.sum()
+
+    # Plot results
+    fig = plt.figure(figsize=(20, 10))
+    gs = plt.GridSpec(5, 2)
+
+    # Plot signal
+    ax_signal = plt.subplot(gs[0, :])
+    ax_signal.plot(dff / (dff.max() - dff.min()) - 1, color='black', linewidth=1., label='dF/F')
+    ax_signal.plot(z / (z.max() - z.min()), color='red', linewidth=1., label='Z-score')
+    ax_signal.legend()
+    ax_signal.set_xlabel('Frame')
+    ax_signal.set_ylabel('Rel. signal')
+
+    # Plot map
+    upper_el = np.pi / 4
+    az, el, r = util.cart2sph(*coords)
+    subimg = img[el < upper_el]
+    subaz = az[el < upper_el]
+    subel = el[el < upper_el]
+
+    # Interpolate
+    xi = np.linspace(subaz.min(), subaz.max(), 100)
+    yi = np.linspace(subel.min(), subel.max(), 100)
+
+    triang = tri.Triangulation(subaz, subel)
+    interpolator = tri.LinearTriInterpolator(triang, subimg)
+    Xi, Yi = np.meshgrid(xi, yi)
+    zi = interpolator(Xi, Yi)
+
+    # Plot
+    ax_map = plt.subplot(gs[1:, :])
+    levels = 20
+    ax_map.contour(xi, yi, zi, levels=levels, linewidths=0.5, colors='k')
+    cntr1 = ax_map.contourf(xi, yi, zi, levels=levels, cmap="seismic")
+
+    mappable = ax_map.scatter(subaz, subel, c=subimg, s=10. + 10 * np.abs(subel), alpha=1., cmap='seismic')
+    plt.colorbar(mappable=cntr1, ax=ax_map)
+    ax_map.set_xlabel('Azimuth [rad]')
+    ax_map.set_ylabel('Elevation [rad]')
+
+    fig.tight_layout()
+    plt.show()
+
+
 def plot_map_overview(look_at: Tuple[int, int], use_phases=(2, 4)):
+    use_phases = (22, )
     # look_at = (3, 410)
 
     print(look_at)
 
-    base_path = '../2021-12-14_Pilot'
+    base_path = '../20220207_Texture_displacement'
+    # base_path = '../2021-12-14_Pilot'
 
     folders = [fn for fn in os.listdir(base_path) if f'rec{look_at[0]}' in fn]
     if not bool(folders):
@@ -25,9 +83,8 @@ def plot_map_overview(look_at: Tuple[int, int], use_phases=(2, 4)):
     folder_name = folders[0]
     recording_folder = os.path.join(base_path, folder_name)
 
-    f = h5py.File(f'{recording_folder}/{folder_name}.output.hdf5', 'r')
+    f = h5py.File(f'{recording_folder}/Preprocessed_data.hdf5', 'r')
 
-    coords = f['vertex_coords'][:].squeeze().T
     z = f[ZSCORE][look_at[1]]
     dff = f[DFF][look_at[1]]
 
@@ -37,6 +94,7 @@ def plot_map_overview(look_at: Tuple[int, int], use_phases=(2, 4)):
     for p_id in use_phases:
 
         phase = f[f'phase{p_id}']
+        coords = phase['vertex_coords'][:].squeeze().T
         ca_start_frame = phase.attrs['ca_start_frame']
         ca_end_frame = phase.attrs['ca_end_frame']
         states = phase['ddp_vertex_states'][:].astype(np.float64)
@@ -142,24 +200,26 @@ def plot_map_overview(look_at: Tuple[int, int], use_phases=(2, 4)):
 if __name__ == '__main__':
 
     # (recording, roi)
-    interesting = [(5, 177),
-                   (5, 176),
-                   (5, 116),
-                   (5, 73),
-                   (4, 184),
-                   (4, 206),
-                   (4, 117),
-                   (3, 410),
-                   (3, 376),
-                   (3, 378),
-                   (3, 267),
-                   (2, 396),
-                   (2, 451),
-                   (2, 444),
-                   (2, 403),
-                   (2, 398),
-                   (2, 384),
-                   (2, 284),]
-
-    for poi in interesting:
+    # interesting = [(5, 177),
+    #                (5, 176),
+    #                (5, 116),
+    #                (5, 73),
+    #                (4, 184),
+    #                (4, 206),
+    #                (4, 117),
+    #                (3, 410),
+    #                (3, 376),
+    #                (3, 378),
+    #                (3, 267),
+    #                (2, 396),
+    #                (2, 451),
+    #                (2, 444),
+    #                (2, 403),
+    #                (2, 398),
+    #                (2, 384),
+    #                (2, 284),]
+    #
+    # for poi in interesting:
+    #     plot_map_overview(poi)
+    for poi in [(1, i) for i in range(300)]:
         plot_map_overview(poi)

@@ -15,5 +15,8 @@ OPT_OVERWRITE = ('--overwrite', '-o', )
 OPT_PLOT = ('--plot', 'p')
 
 CMD_EXCTRACT_ROIS = 'extract_rois'
+CMD_PROCESS_SIGNALS = 'process_signals'
 CMD_FILTER_ROIS = 'filter_rois'
 CMD_DETECT_EVENTS = 'detect_events'
+
+PATH_FN_PREPROCESSED = 'Preprocessed_data.hdf5'

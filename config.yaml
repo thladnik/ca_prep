@@ -1,1 +1,4 @@
 Y_MIRROR_SIGNAL: y_mirror_in
+TIME_POSTFIX: _time
+IO_FILENAME: Io.hdf5
+DISPLAY_FILENAME: Display.hdf5

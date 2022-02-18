@@ -1,7 +1,13 @@
+"""Image processing functions for
+
+Original image segmentation by Yue Zhang"""
+
 import copy
 import cv2
 import h5py as h5
 import logging
+
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 from scipy import ndimage as ndi
@@ -15,14 +21,14 @@ from skimage import io
 from skimage.registration import phase_cross_correlation
 
 import config
+import opts
 import util
 from definitions import *
 
 log = logging.getLogger(__name__)
 
 
-def run(recording_folder, io_filename='Io.hdf5', disp_filename='Display.hdf5', **kwargs):
-    # Iterate over all folders
+def extract_rois(recording_folder: str):
     log.info(f'Process image data in {recording_folder}')
 
     ca_filename = util.get_tif_filename(recording_folder)
@@ -34,19 +40,18 @@ def run(recording_folder, io_filename='Io.hdf5', disp_filename='Display.hdf5', *
     log.info(f'Using Ca file {ca_filepath}')
 
     # Check paths
-    disp_filepath = os.path.join(recording_folder, disp_filename)
+    disp_filepath = os.path.join(recording_folder, config.DISPLAY_FILENAME)
     if not os.path.exists(disp_filepath):
-        log.warning(f'{disp_filename} not found')
+        log.warning(f'{config.DISPLAY_FILENAME} not found')
         return False
 
-    io_filepath = os.path.join(recording_folder, io_filename)
+    io_filepath = os.path.join(recording_folder, config.IO_FILENAME)
     if not os.path.exists(io_filepath):
-        log.warning(f'{io_filename} not found')
+        log.warning(f'{config.IO_FILENAME} not found')
         return False
 
-    out_name = '.'.join(ca_filename.split('.')[:-1])
-    out_filepath = os.path.join(recording_folder, f'{out_name}.output.hdf5')
-    if os.path.exists(out_filepath) and not kwargs[ARG_OVERWRITE]:
+    out_filepath = os.path.join(recording_folder, PATH_FN_PREPROCESSED)
+    if os.path.exists(out_filepath) and not opts.OVERWRITE:
         log.warning(f'Skip {recording_folder}. Output file already exists. '
                     f'Use overwrite option "{OPT_OVERWRITE}"')
         return False
@@ -56,45 +61,29 @@ def run(recording_folder, io_filename='Io.hdf5', disp_filename='Display.hdf5', *
 
     log.info('Run registration')
     # Do registration and segmentation
-    ca_data = CalciumImagingData(ca_filepath)
+    ca_data = CalciumImagingData(ca_filepath, recording_folder)
     ca_data.registration()
-    ca_frame_indices, ca_frame_times = get_ca_frame_timing(io_filepath, ca_data.raw_frames.shape[0])
+    ca_frame_indices, ca_frame_times = get_ca_frame_timing(recording_folder)
+    log.info('Run segmentation')
     rois = RoiSelector(ca_data.std_image)
     raw_calcium_signals = ca_data.extract_calcium_signals(rois.mask_labels)
-
-    with h5.File(out_filepath, 'r') as f:
-        disp_start_time = f['phase1'].attrs['start_time']
-        dff = calculate_dffs(disp_start_time, ca_frame_times, ca_frame_indices, raw_calcium_signals)
 
     log.info(f'Write to output file at {out_filepath}')
     with h5.File(out_filepath, 'a') as out_file:
         outputs = {REGISTERED_FRAMES: ca_data.registered_frames,
                    STD_IMAGE: ca_data.std_image,
-                   DFF: dff,
                    RAW_F: raw_calcium_signals,
                    ROI_MASK: rois.mask_labels,
                    FRAME_TIME: ca_frame_times}
 
-        for key, val in outputs.items():
-            if key not in out_file.keys():
-                dset = out_file.create_dataset(key, val.shape)
-            else:
-                dset = out_file[key]
-            dset[:] = val
-
-        for key in out_file.keys():
-            if 'phase' not in key:
-                continue
-
-            frame_start_idx = np.argmin(np.abs(out_file[f'{key}/ddp_time'][0] - ca_frame_times))
-            out_file[key].attrs['ca_start_frame'] = frame_start_idx
-            frame_end_idx = np.argmin(np.abs(out_file[f'{key}/ddp_time'][-1] - ca_frame_times))
-            out_file[key].attrs['ca_end_frame'] = frame_end_idx
+        for dataset_name, data in outputs.items():
+            util.create_dataset(out_file, dataset_name, data)
 
 
 class CalciumImagingData:
-    def __init__(self, cafn, **kwargs):
+    def __init__(self, cafn, recording_folder, **kwargs):
         self.raw_frames = np.array(io.imread(cafn))
+        self.recording_folder = recording_folder
 
         self.binsize = kwargs.get('binsize')
         if self.binsize is None:
@@ -130,6 +119,19 @@ class CalciumImagingData:
         self.registered_frames = regTifImg
         self.std_image = np.std(self.registered_frames, axis=0)
 
+        # Plot result
+        fig_name = 'Registration_STD_image'
+        fig, ax = plt.subplots(1, 2, figsize=(16,8), num=fig_name)
+        ax[0].set_title('Raw STD image')
+        ax[0].imshow(np.std(self.raw_frames, axis=0))
+        ax[1].set_title('Registered STD image')
+        ax[1].imshow(self.std_image)
+        fig.tight_layout()
+        plt.savefig(os.path.join(self.recording_folder, f'{fig_name}.png'), format='png')
+
+        if opts.PLOT:
+            plt.show()
+
     def extract_calcium_signals(self, roi_masks: np.ndarray) -> np.ndarray:
         raw_calcium_signals = []
         for i in np.unique(roi_masks):
@@ -142,31 +144,52 @@ class CalciumImagingData:
         return np.array(raw_calcium_signals)
 
 
-def calculate_dffs(stimulus_start_time, ca_frame_times, ca_frame_indices, raw_calcium_signals):
-    caframetimeIdx = np.argmax(ca_frame_times[ca_frame_times < stimulus_start_time])
-    bl_end_frame = ca_frame_indices[caframetimeIdx]
-    dff = [(i - np.mean(i[:bl_end_frame])) / np.mean(i[:bl_end_frame]) for i in raw_calcium_signals]
-
-    return np.array(dff)
-
-
-def get_ca_frame_timing(timeInfoH5Fn, ca_frame_count):
-    with h5.File(timeInfoH5Fn, 'r') as mirInfo:
+def get_ca_frame_timing(recording_path):
+    with h5.File(os.path.join(recording_path, config.IO_FILENAME), 'r') as mirInfo:
         mirror_position = np.squeeze(mirInfo[config.Y_MIRROR_SIGNAL])
         mirror_time = np.squeeze(mirInfo[f'{config.Y_MIRROR_SIGNAL}{config.TIME_POSTFIX}'])
 
-    mirror_pos_diff = np.diff(mirror_position)
-    temp_ind, _ = find_peaks(mirror_pos_diff, prominence=np.std(mirror_pos_diff))
-    peak_ind, _ = find_peaks(mirror_position[temp_ind[0]:], prominence=np.std(mirror_pos_diff))
-    valley_ind, _ = find_peaks(-mirror_position[temp_ind[0]:], prominence=np.std(mirror_pos_diff))
-    valley_ind = np.hstack([1, valley_ind])
-    ca_frame_indices = temp_ind[0] + np.unique(np.concatenate([peak_ind, valley_ind], axis=0)) - 1
+    peak_prominence = (mirror_position.max() - mirror_position.min()) / 4
+    peak_idcs, _ = find_peaks(mirror_position, prominence=peak_prominence)
+    trough_idcs, _ = find_peaks(-mirror_position, prominence=peak_prominence)
 
-    # Only use timepoints for there are frames (recording may run longer than ca imaging)
-    ca_frame_indices = ca_frame_indices[:ca_frame_count]
-    ca_frame_times = mirror_time[ca_frame_indices]
+    # Find first trough
+    first_peak = peak_idcs[0]
+    first_trough = trough_idcs[trough_idcs < first_peak][-1]
+    # Discard all before first trough
+    trough_idcs = trough_idcs[first_trough <= trough_idcs]
 
-    return ca_frame_indices, ca_frame_times
+    # Use midpoint between troughs and peaks as frame index
+    if trough_idcs.shape[0] == peak_idcs.shape[0]:
+        trough_to_peak_frame = (peak_idcs + trough_idcs) // 2
+        peak_to_trough_frames = (peak_idcs[:-1] + trough_idcs[1:]) // 2
+    else:
+        # Otherwise (trough_idcs.shape[0] > peak_idcs.shape[0]) has to be true, because trough always comes first
+        trough_to_peak_frame = (peak_idcs + trough_idcs[:-1]) // 2
+        peak_to_trough_frames = (peak_idcs + trough_idcs[1:]) // 2
+    frame_idcs = np.sort(np.concatenate([trough_to_peak_frame, peak_to_trough_frames]))
+
+    # Get corresponding times
+    frame_times = mirror_time[frame_idcs]
+
+    # Plot frame time detection results
+    fig_name = 'Y_mirror_frame_detection'
+    fig, ax = plt.subplots(1, 3, figsize=(18, 4), num=fig_name)
+    markersize = 3.
+    for a in ax:
+        a.plot(mirror_time, mirror_position)
+        a.plot(mirror_time[peak_idcs], mirror_position[peak_idcs], 'o', markersize=markersize)
+        a.plot(mirror_time[trough_idcs], mirror_position[trough_idcs], 'o', markersize=markersize)
+        a.plot(mirror_time[frame_idcs], mirror_position[frame_idcs], 'o', markersize=markersize)
+    ax[0].set_xlim(mirror_time[frame_idcs][0]-10, mirror_time[frame_idcs][0]+10)
+    ax[2].set_xlim(mirror_time[frame_idcs][-1]-10, mirror_time[frame_idcs][-1]+10)
+    fig.tight_layout()
+    plt.savefig(os.path.join(recording_path, f'{fig_name}.pdf'), format='pdf')
+
+    if opts.PLOT:
+        plt.show()
+
+    return frame_idcs, frame_times
 
 
 class RoiSelector:

@@ -5,13 +5,76 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
+import scipy.interpolate
 import sklearn.mixture
-from hmmlearn.hmm import GMMHMM
 
 from definitions import *
 import util
 
 log = logging.getLogger(__name__)
+
+
+def process_signals(recording_folder: str):
+
+    # Calculate signals from extracted ROI mean fluorescence
+    calculate_signals(recording_folder)
+
+    # Add data to individual stimulation phases
+    add_phase_data(recording_folder)
+
+
+def calculate_signals(recording_folder: str):
+
+    log.info(f'Process signals in {recording_folder}')
+
+    with h5py.File(os.path.join(recording_folder, PATH_FN_PREPROCESSED), 'a') as f:
+
+        # The start time is set to the first phase (anything prior to the start time is used as "baseline" signal
+        phase1_start_time = f['phase1'].attrs['start_time']
+
+        raw_signals = f[RAW_F][:]
+        all_frame_times = f[FRAME_TIME][:]
+
+        # Calculate DFF
+        baseline_end_idx = np.argmin(np.abs(all_frame_times-phase1_start_time))
+        fun = lambda d: (d - d[:baseline_end_idx].mean()) / d[:baseline_end_idx].mean()
+        # dff = np.array([(i - np.mean(i[:baseline_end_idx])) / np.mean(i[:baseline_end_idx]) for i in raw_signals])
+        dff = np.array([fun(s) for s in raw_signals])
+        util.create_dataset(f, DFF, dff)
+        # Calculate z-score
+        zscore = scipy.stats.zscore(dff, axis=1)
+        util.create_dataset(f, ZSCORE, zscore)
+
+
+def add_phase_data(recording_folder: str):
+
+    log.info('Attach additional data to stimulation phases and up-sample signals')
+
+    with h5py.File(os.path.join(recording_folder, PATH_FN_PREPROCESSED), 'a') as f:
+
+        all_frame_times = f[FRAME_TIME][:]
+
+        # Go trough all phases and attach info
+        for key, phase in f.items():
+            # Skip datasets
+            if 'phase' not in key:
+                continue
+
+            phase_display_times = np.squeeze(phase['ddp_time'][:])
+            # Set phase start index
+            frame_start_idx = np.argmin(np.abs(phase_display_times[0] - all_frame_times))
+            phase.attrs['ca_start_frame'] = frame_start_idx
+            # Set phase end index
+            frame_end_idx = np.argmin(np.abs(phase_display_times[-1] - all_frame_times))
+            phase.attrs['ca_end_frame'] = frame_end_idx
+
+            # Interpolate DFF
+            dff_upsampled = np.array([scipy.interpolate.interp1d(all_frame_times, d)(phase_display_times) for d in f[DFF]])
+            util.create_dataset(phase, DFF, data=dff_upsampled)
+
+            # Interpolate z-score
+            zscore_upsampled = np.array([scipy.interpolate.interp1d(all_frame_times, z)(phase_display_times) for z in f[ZSCORE]])
+            util.create_dataset(phase, ZSCORE, data=zscore_upsampled)
 
 
 def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
@@ -27,7 +90,21 @@ def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
         dff = f[DFF][:]
         zscore = f[ZSCORE][:]
 
+        # fig, ax = plt.subplots(1, 1, num='DFF histogram')
+        # counts, bins, _ = ax.hist(dff.flatten(), bins=1000)
+        #
+        # bin_centers = bins[:-1] + (bins[1] - bins[0]) / 2
+        #
+        # import scipy.optimize
+        # params, cov = scipy.optimize.curve_fit(lambda x, loc, scale, ymax: ymax * scipy.stats.norm.pdf(x, loc=loc, scale=scale), bin_centers, counts)
+        # norm = params[2] * scipy.stats.norm.pdf(bin_centers, loc=params[0], scale=params[1])
+        # ax.plot(bin_centers, norm / norm.max() * counts.max(), color='red')
+        #
+        # if kwargs[ARG_PLOT]:
+        #     plt.show()
+
         # Filter by DFF
+        max_dff_thresh = dff.mean() + 4 * dff.std()
         selected = dff.max(axis=1) > max_dff_thresh
         selected_dff = dff[selected]
         selected_zscore = zscore[selected]
@@ -40,22 +117,22 @@ def filter_rois(recording_folder: str, max_dff_thresh: float, **kwargs):
         for i, (s, d, z) in enumerate(zip(selected, dff, zscore)):
             if s:
                 ax[0].plot(times, i + d / dmult, color='black', linewidth=.5)
-                ax[1].plot(times, i + z / zmult, color='red', linewidth=.5)
+                ax[1].plot(times, i + z / zmult, color='black', linewidth=.5)
             else:
                 ax[0].plot(times, i + d / dmult, color='gray', linewidth=.5)
-                ax[1].plot(times, i + z / zmult, color='orange', linewidth=.5)
+                ax[1].plot(times, i + z / zmult, color='gray', linewidth=.5)
 
         stim_seps = util.get_phase_start_points(f)
 
         ax[0].set_title('dF/F')
         ax[0].set_ylabel('ROI')
         ax[0].set_xlabel('Time [s]')
-        ax[0].vlines(times[stim_seps], 0, count, colors='orange')
+        ax[0].vlines(times[stim_seps], 0, count, colors='orange', linewidth=.5)
         ax[0].set_yticks(np.arange(count, step=25))
 
         ax[1].set_title('Z-Score')
         ax[1].set_xlabel('Time [s]')
-        ax[1].vlines(times[stim_seps], 0, count, colors='orange')
+        ax[1].vlines(times[stim_seps], 0, count, colors='orange', linewidth=.5)
         ax[1].set_yticks(np.arange(count, step=25))
         ax[1].set_ylim(-1, count+2)
         fig.tight_layout()
