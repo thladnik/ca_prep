@@ -1,0 +1,10 @@
+h5py~=3.6.0
+numpy~=1.22.2
+pandas~=1.4.1
+PyYAML~=6.0
+opencv-python~=4.5.5.62
+matplotlib~=3.5.1
+scipy~=1.8.0
+scikit-image~=0.19.1
+scikit-learn~=1.0.2
+setuptools~=57.0.0

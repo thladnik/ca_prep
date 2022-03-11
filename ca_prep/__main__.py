@@ -1,14 +1,9 @@
-import os.path
 import sys
-import h5py
-import matplotlib.pyplot as plt
-import numpy as np
 import logging
 
-import opts
-from preprocessing import image_processing, signal_processing
+from ca_prep import opts, util
+from ca_prep.preprocessing import image_processing, signal_processing
 from definitions import *
-import util
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -38,7 +33,7 @@ if __name__ == '__main__':
         quit()
 
     # Load config
-    util.load_configuration('config.yaml')
+    # util.load_configuration('../config.yaml')
 
     # Get cmd options
     opts.OVERWRITE = any([alt in sys.argv for alt in OPT_OVERWRITE])

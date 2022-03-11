@@ -1,8 +1,6 @@
 ZSCORE = 'zscore'
-SELECTED_ZSCORE = 'selected_zscore'
 DFF = 'dff'
 REGISTERED_FRAMES = 'registered_frames'
-SELECTED_DFF = 'selected_dff'
 RAW_F = 'raw_f'
 STD_IMAGE = 'std_image'
 ROI_MASK = 'roi_mask'

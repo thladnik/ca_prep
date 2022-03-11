@@ -4,16 +4,17 @@ from typing import List, Union, Callable
 
 import h5py.h5i
 import numpy as np
+import pandas as pd
 import yaml
 
-import config
+from ca_prep import config
 from definitions import *
 
 log = logging.getLogger(__name__)
 
 
 def create_dataset(f: h5py.File, dataset_name: str, data: np.ndarray):
-    log.info(f'Create dataset {dataset_name} in {f}')
+    log.debug(f'Create dataset {dataset_name} in {f}')
     if dataset_name in f:
         del f[dataset_name]
     f.create_dataset(dataset_name, data=data)
@@ -87,3 +88,34 @@ def load_configuration(config_filepath: str):
         _config = yaml.safe_load(f)
         log.info(f'Use configuration {_config}')
         config.__dict__.update(_config)
+
+
+def calculate_repeatability(df: pd.DataFrame, use_key: str = ZSCORE) -> float:
+
+    if df.shape[0] == 3:
+        # Calculate Pearson correlation coefficients for 3 repeats
+        min_len = min([d.shape[0] for d in df[use_key].array])
+
+        ar = np.stack([d[:min_len] for d in df[use_key].array])
+        ccef = np.corrcoef(ar)
+        ccef1, ccef2, ccef3 = ccef[0, 1], ccef[0, 2], ccef[1, 2]
+        mccef = np.mean([ccef1, ccef2, ccef3])
+
+        return mccef
+
+    else:
+        return 0
+
+
+def calculate_mean_dff(df: pd.DataFrame, use_key: str = ZSCORE) -> np.ndarray:
+
+    min_len = min([d.shape[0] for d in df[use_key].array])
+    ar = np.stack([d[:min_len] for d in df[use_key].array])
+
+    return np.mean(ar, axis=0)
+
+
+def get_time(df: pd.DataFrame, time_key: str = 'var_param_time') -> np.ndarray:
+
+    min_len = min([d.shape[0] for d in df.dff.array])
+    return df[time_key].array[:min_len]

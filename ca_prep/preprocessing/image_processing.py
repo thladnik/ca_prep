@@ -20,10 +20,8 @@ from skimage.filters import threshold_local
 from skimage import io
 from skimage.registration import phase_cross_correlation
 
-import config
-import opts
-import util
-from definitions import *
+from ca_prep import config, opts, util
+from ca_prep.definitions import *
 
 log = logging.getLogger(__name__)
 
@@ -59,11 +57,15 @@ def extract_rois(recording_folder: str):
     log.info(f'Copy file {disp_filepath} to {out_filepath} for final output')
     shutil.copyfile(disp_filepath, out_filepath)
 
+    log.info('Calculate frame timings')
+    ca_frame_indices, ca_frame_times = get_ca_frame_timing(recording_folder)
+
     log.info('Run registration')
     # Do registration and segmentation
     ca_data = CalciumImagingData(ca_filepath, recording_folder)
+    ca_data.raw_frames = ca_data.raw_frames[:ca_frame_times.shape[0]]
     ca_data.registration()
-    ca_frame_indices, ca_frame_times = get_ca_frame_timing(recording_folder)
+
     log.info('Run segmentation')
     rois = RoiSelector(ca_data.std_image)
     raw_calcium_signals = ca_data.extract_calcium_signals(rois.mask_labels)
@@ -156,18 +158,28 @@ def get_ca_frame_timing(recording_path):
     # Find first trough
     first_peak = peak_idcs[0]
     first_trough = trough_idcs[trough_idcs < first_peak][-1]
-    # Discard all before first trough
-    trough_idcs = trough_idcs[first_trough <= trough_idcs]
 
     # Use midpoint between troughs and peaks as frame index
-    if trough_idcs.shape[0] == peak_idcs.shape[0]:
-        trough_to_peak_frame = (peak_idcs + trough_idcs) // 2
-        peak_to_trough_frames = (peak_idcs[:-1] + trough_idcs[1:]) // 2
+    use_midpoints = False
+    if use_midpoints:
+        # Discard all before first trough
+        trough_idcs = trough_idcs[first_trough <= trough_idcs]
+
+        # Calculate all midpoints
+        if trough_idcs.shape[0] == peak_idcs.shape[0]:
+            trough_to_peak_frame = (peak_idcs + trough_idcs) // 2
+            peak_to_trough_frames = (peak_idcs[:-1] + trough_idcs[1:]) // 2
+        else:
+            # Otherwise (trough_idcs.shape[0] > peak_idcs.shape[0]) has to be true, because trough always comes first
+            trough_to_peak_frame = (peak_idcs + trough_idcs[:-1]) // 2
+            peak_to_trough_frames = (peak_idcs + trough_idcs[1:]) // 2
+        frame_idcs = np.sort(np.concatenate([trough_to_peak_frame, peak_to_trough_frames]))
+
+    # Use peaks and troughs
     else:
-        # Otherwise (trough_idcs.shape[0] > peak_idcs.shape[0]) has to be true, because trough always comes first
-        trough_to_peak_frame = (peak_idcs + trough_idcs[:-1]) // 2
-        peak_to_trough_frames = (peak_idcs + trough_idcs[1:]) // 2
-    frame_idcs = np.sort(np.concatenate([trough_to_peak_frame, peak_to_trough_frames]))
+        # Discard all before (and including) first trough
+        trough_idcs = trough_idcs[first_trough < trough_idcs]
+        frame_idcs = np.sort(np.concatenate([trough_idcs, peak_idcs]))
 
     # Get corresponding times
     frame_times = mirror_time[frame_idcs]
